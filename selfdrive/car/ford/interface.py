@@ -5,10 +5,10 @@ from common.conversions import Conversions as CV    # 0.8.16 兼容路径
 from selfdrive.car.ford.values import MAX_ANGLE, CAR
 from selfdrive.car import STD_CARGO_KG, scale_rot_inertia, scale_tire_stiffness, gen_empty_fingerprint
 from selfdrive.car.interfaces import CarInterfaceBase
-from common.op_params import opParams
+#from common.op_params import opParams
 from common.params import Params
 
-op_params = opParams()
+#op_params = opParams()
 apaAcknowledged = Params().get('apaAcknowledged') == b'1'
 
 class CarInterface(CarInterfaceBase):
