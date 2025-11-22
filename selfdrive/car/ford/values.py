@@ -1,236 +1,207 @@
-from collections import defaultdict
-from dataclasses import dataclass
-from enum import Enum
-from typing import Dict, List, Set, Union
-
+from selfdrive.car import dbc_dict
 from cereal import car
-from selfdrive.car import AngleRateLimit, dbc_dict
-from selfdrive.car.docs_definitions import CarInfo, Harness
-from selfdrive.car.fw_query_definitions import FwQueryConfig, Request, StdQueries
-
 Ecu = car.CarParams.Ecu
 
-
-class CarControllerParams:
-  # Messages: Lane_Assist_Data1, LateralMotionControl
-  STEER_STEP = 5
-  # Message: ACCDATA
-  ACC_CONTROL_STEP = 2
-  # Message: IPMA_Data
-  LKAS_UI_STEP = 100
-  # Message: ACCDATA_3
-  ACC_UI_STEP = 5
-  # Message: Steering_Data_FD1, but send twice as fast
-  BUTTONS_STEP = 10 / 2
-
-  CURVATURE_MAX = 0.02  # Max curvature for steering command, m^-1
-  STEER_DRIVER_ALLOWANCE = 1.0  # Driver intervention threshold, Nm
-
-  # Curvature rate limits
-  # TODO: unify field names used by curvature and angle control cars
-  # ~2 m/s^3 up, ~-3 m/s^3 down
-  ANGLE_RATE_LIMIT_UP = AngleRateLimit(speed_bp=[5, 15, 25], angle_v=[0.004, 0.00044, 0.00016])
-  ANGLE_RATE_LIMIT_DOWN = AngleRateLimit(speed_bp=[5, 15, 25], angle_v=[0.006, 0.00066, 0.00024])
-
-  ACCEL_MAX = 2.0               # m/s^s max acceleration
-  ACCEL_MIN = -3.5              # m/s^s max deceleration
-
-  def __init__(self, CP):
-    pass
-
-
-class CANBUS:
-  main = 0
-  radar = 1
-  camera = 2
-
-
+MAX_ANGLE = 30.  # make sure we never command the extremes (0xfff) which cause latching fault
+  
+class CarControllerParams: 
+  ANGLE_MAX_BP = [0., 11., 36.]
+  ANGLE_MAX_V = [410., 35., 15.]
+  ANGLE_DELTA_BP = [0., 5., 15.]
+  ANGLE_DELTA_V = [5., .8, .15]     #windup
+  ANGLE_DELTA_VU = [5., 3.5, 0.4] #unwind
+  BRAKE_MAX = 1024//4
+  FRAME_STEP = 16
+  
 class CAR:
-  BRONCO_SPORT_MK1 = "FORD BRONCO SPORT 1ST GEN"
-  ESCAPE_MK4 = "FORD ESCAPE 4TH GEN"
-  EXPLORER_MK6 = "FORD EXPLORER 6TH GEN"
-  FOCUS_MK4 = "FORD FOCUS 4TH GEN"
-  MAVERICK_MK1 = "FORD MAVERICK 1ST GEN"
+  #Unsupported Ford Models
+  #CMAX = "FORD C-MAX" C-MAX is not supported on any year or trim. 
+  #ECOSPORT = "FORD ECOSPORT" EcoSport is not supported on any year or trim. 
+  
+  #SG denotes Stop/Go, where op can take longitudinal control. 
+  
+  #Ford models w/ lkas and acc
+  EDGE = "FORD EDGE" # 2013+ 2011-2012 has acc only Shares arch with 2013+. May be able to add IPMA to HS2.
+  ESCAPE = "FORD ESCAPE" # 2017+
+  EXPEDITION = "FORD EXPEDITION" # 2018+
+  EXPLORER = "FORD EXPLORER" # 2013+. 2011-2012 has acc only. Shares arch with Explorer 2013+. May be able to add IPMA to HS2.
+  F150 = "FORD F150" # 2015-2017
+  F150SG = "FORD F150 STOP/GO" # 2018+
+  FUSION = "FORD FUSION" # 2013-2017
+  FUSIONSG = "FORD FUSION STOP/GO" # 2018+
+  MUSTANG = "FORD MUSTANG" # 2018+ 2015-2017 has acc only. 2015-2017 shares arch with Mustang 2018+. May be able to add IPMA to HS2. Not available on Shelby GT350 or GT500.
+  MONDEO = "FORD MONDEO" # euro spec fusion. maintained by tambetm
+  RANGER = "FORD RANGER" # 2019+
+  TAURUS = "FORD TAURUS" # 2014+ 2010-2013 has acc only. 2013 shares arch with Taurus 2014+. May be able to add IPMA to HS2.
+  #Ford models with lkas or acc but not both
+  FLEX = "FORD FLEX" # Flex does not have LKAS on any year or trim. ACC only 2013+. Uses same arch as Explorer 2013-2015. May be able to add IPMA to HS2.
+  FOCUS = "FORD FOCUS" # Focus does not have ACC on any year or trim. Steering only 2015+. Uses same arch as Escape. May be able to add CCM to HS2.
+  TRANSIT = "FORD TRANSIT" # 2020+ 2013-2017 has LKAS only.
+  #Lincoln models w/ lkas and acc
+  AVIATOR = "LINCOLN AVIATOR" # 2020+. 
+  CONTINENTAL = "LINCOLN CONTINENTAL" # 2017+
+  CORSAIR = "LINCOLN CORSAIR" # Corsair is a rebranded MKC. 2020+
+  MKC = "LINCOLN MKC" # 2015+. 
+  MKS = "LINCOLN MKS" # 2013+. 2010-2012 is ACC only. Uses Taurus DBC. 
+  MKT = "LINCOLN MKT" # 2013+. 2011-2012 is ACC only. Uses Explorer DBC. 
+  MKX = "LINCOLN MKX" # 2016+. 2011-2015 is ACC only. May be able to add IPMA to HS2. Uses Edge DBC. 
+  MKZ = "LINCOLN MKZ" # 2013+ Uses Fusion DBC
+  NAVIGATOR = "LINCOLN NAVIGATOR" # 2018+. Uses Expedition DBC. 
+  NAUTILUS = "LINCOLN NAUTILUS" # Nautilus is a rebranded MKX. 2019+
 
-
-CANFD_CARS: Set[str] = set()
-
-
-class RADAR:
-  DELPHI_ESR = 'ford_fusion_2018_adas'
-  DELPHI_MRR = 'FORD_CADS'
-
-
-DBC: Dict[str, Dict[str, str]] = defaultdict(lambda: dbc_dict("ford_lincoln_base_pt", RADAR.DELPHI_MRR))
-
-
-@dataclass
-class FordCarInfo(CarInfo):
-  package: str = "Co-Pilot360 Assist+"
-  harness: Enum = Harness.ford_q3
-
-
-CAR_INFO: Dict[str, Union[CarInfo, List[CarInfo]]] = {
-  CAR.BRONCO_SPORT_MK1: FordCarInfo("Ford Bronco Sport 2021-22"),
-  CAR.ESCAPE_MK4: [
-    FordCarInfo("Ford Escape 2020-22"),
-    FordCarInfo("Ford Escape Plug-in Hybrid 2020-22"),
-    FordCarInfo("Ford Kuga 2020-21", "Driver Assistance Pack"),
-    FordCarInfo("Ford Kuga Plug-in Hybrid 2020-22", "Driver Assistance Pack"),
-  ],
-  CAR.EXPLORER_MK6: [
-    FordCarInfo("Ford Explorer 2020-22"),
-    FordCarInfo("Lincoln Aviator 2021", "Co-Pilot360 Plus"),
-    FordCarInfo("Lincoln Aviator Plug-in Hybrid 2021", "Co-Pilot360 Plus"),
-  ],
-  CAR.FOCUS_MK4: FordCarInfo("Ford Focus EU 2019", "Driver Assistance Pack"),
-  CAR.MAVERICK_MK1: FordCarInfo("Ford Maverick 2022", "Co-Pilot360 Assist"),
+FINGERPRINTS = {
+  #Ford
+  CAR.FUSIONSG: [{
+    71: 8, 74: 8, 75: 8, 76: 8, 90: 8, 92: 8, 93: 8, 118: 8, 119: 8, 120: 8, 125: 8, 129: 8, 130: 8, 131: 8, 132: 8, 133: 8, 145: 8, 146: 8, 357: 8, 359: 8, 360: 8, 361: 8, 376: 8, 390: 8, 391: 8, 392: 8, 394: 8, 512: 8, 514: 8, 516: 8, 531: 8, 532: 8, 534: 8, 535: 8, 560: 8, 578: 8, 604: 8, 613: 8, 673: 8, 827: 8, 848: 8, 934: 8, 935: 8, 936: 8, 947: 8, 963: 8, 970: 8, 972: 8, 973: 8, 984: 8, 992: 8, 994: 8, 997: 8, 998: 8, 1003: 8, 1034: 8, 1045: 8, 1046: 8, 1053: 8, 1054: 8, 1058: 8, 1059: 8, 1068: 8, 1072: 8, 1073: 8, 1082: 8, 1107: 8, 1108: 8, 1109: 8, 1110: 8, 1200: 8, 1427: 8, 1430: 8, 1438: 8, 1459: 8
+  }],
+  #CAR.EDGE: [{
+  #}], 
+  #CAR.ESCAPE: [{
+  #}], 
+  #CAR.EXPEDITION: [{
+  #}], 
+  #CAR.EXPLORER: [{
+  #}], 
+  CAR.F150: [
+  #{ 
+    #2015 Lariat 502A
+  #  74: 8, 75: 8, 76: 8, 118: 8, 119: 8, 120: 8, 125: 8, 129: 8, 130: 8, 131: 8, 133: 8, 145: 8, 146: 8, 357: 8, 359: 8, 376: 8, 390: 8, 391: 8, 392: 8, 394: 8, 512: 8, 514: 8, 516: 8, 531: 8, 532: 8, 534: 8, 535: 8, 560: 8, 578: 8, 611: 8, 613: 8, 673: 8, 827: 8, 848: 8, 934: 8, 935: 8, 936: 8, 938: 8, 939: 8, 947: 8, 963: 8, 970: 8, 972: 8, 984: 8, 992: 8, 994: 8, 997: 8, 998: 8, 1003: 8, 1006: 8, 1034: 8, 1042: 8, 1045: 8, 1046: 8, 1047: 8, 1054: 8, 1058: 8, 1059: 8, 1068: 8, 1072: 8, 1090: 8, 1091: 8, 1093: 8, 1105: 8, 1107: 8, 1108: 8, 1109: 8, 1114: 8, 1186: 8, 1200: 8, 1430: 8, 1438: 8, 1441: 8, 1459: 8, 1461: 8, 1472: 8, 1824: 8, 1888: 8, 1896: 8
+  #},
+  {
+    #2018 Stop/Go
+    74: 8, 75: 8, 76: 8, 92: 8, 118: 8, 119: 8, 120: 8, 125: 8, 129: 8, 130: 8, 131: 8, 133: 8, 145: 8, 146: 8, 357: 8, 359: 8, 370: 8, 376: 8, 390: 8, 391: 8, 392: 8, 394: 8, 512: 8, 514: 8, 516: 8, 531: 8, 532: 8, 534: 8, 535: 8, 560: 8, 578: 8, 611: 8, 613: 8, 673: 8, 827: 8, 845: 8, 848: 8, 850: 8, 934: 8, 935: 8, 936: 8, 938: 8, 939: 8, 945: 8, 947: 8, 961: 8, 962: 8, 963: 8, 970: 8, 972: 8, 973: 8, 979: 8, 980: 8, 983: 8, 984: 8, 985: 8, 992: 8, 994: 8, 997: 8, 998: 8, 1003: 8, 1006: 8, 1034: 8, 1042: 8, 1045: 8, 1046: 8, 1047: 8, 1053: 8, 1054: 8, 1056: 8, 1058: 8, 1059: 8, 1068: 8, 1072: 8, 1073: 8, 1080: 8, 1082: 8, 1090: 8, 1091: 8, 1093: 8, 1102: 8, 1105: 8, 1107: 8, 1108: 8, 1109: 8, 1110: 8, 1114: 8, 1122: 8, 1126: 8, 1186: 8, 1200: 8, 1430: 8, 1438: 8, 1441: 8, 1459: 8, 1461: 8, 1472: 8, 1609: 8, 1611: 8, 1798: 8, 1824: 8, 1888: 8, 1896: 8
+  }],
+  #CAR.MUSTANG: [{
+  #}], 
+  CAR.MONDEO: [{
+    71: 8, 73: 8, 74: 8, 75: 8, 76: 8, 118: 8, 119: 8, 120: 8, 125: 8, 129: 8, 130: 8, 131: 8, 132: 8, 133: 8, 145: 8, 146: 8, 357: 8, 359: 8, 376: 8, 512: 8, 514: 8, 516: 8, 531: 8, 532: 8, 534: 8, 535: 8, 560: 8, 578: 8, 609: 8, 673: 8, 825: 8, 827: 8, 848: 8, 936: 8, 947: 8, 963: 8, 972: 8, 992: 8, 994: 8, 998: 8, 1003: 8, 1034: 8, 1045: 8, 1046: 8, 1058: 8, 1059: 8, 1068: 8, 1071: 8, 1072: 8, 1073: 8, 1108: 8, 1109: 8, 1200: 8, 1214: 8, 1215: 8, 1430: 8, 1438: 8, 1459: 8
+  }],
+  #CAR.RANGER: [{
+  #}], 
+  #CAR.TAURUS: [{
+  #}], 
+  #CAR.FLEX: [{
+  #}], 
+  #CAR.FOCUS: [{
+  #}], 
+  #CAR.TRANSIT: [{
+  #}], 
+  #Lincoln
+  #CAR.AVIATOR: [{
+  #}], 
+  #CAR.CONTINENTAL: [{
+  #}], 
+  #CAR.CORSAIR: [{
+  #}], 
+  #CAR.MKC: [{
+  #}], 
+  #CAR.MKS: [{
+  #}], 
+  #CAR.MKT: [{
+  #}], 
+  #CAR.MKX: [{
+  #}], 
+  #CAR.MKZ: [{
+  #}], 
+  #CAR.NAVIGATOR: [{
+  #}], 
+  #CAR.NAUTILUS: [{
+  #}], 
 }
 
-FW_QUERY_CONFIG = FwQueryConfig(
-  requests=[
-    Request(
-      [StdQueries.TESTER_PRESENT_REQUEST, StdQueries.MANUFACTURER_SOFTWARE_VERSION_REQUEST],
-      [StdQueries.TESTER_PRESENT_RESPONSE, StdQueries.MANUFACTURER_SOFTWARE_VERSION_RESPONSE],
-      whitelist_ecus=[Ecu.engine],
-    ),
-    Request(
-      [StdQueries.TESTER_PRESENT_REQUEST, StdQueries.MANUFACTURER_SOFTWARE_VERSION_REQUEST],
-      [StdQueries.TESTER_PRESENT_RESPONSE, StdQueries.MANUFACTURER_SOFTWARE_VERSION_RESPONSE],
-      bus=0,
-      whitelist_ecus=[Ecu.eps, Ecu.abs, Ecu.fwdRadar, Ecu.fwdCamera, Ecu.shiftByWire],
-    ),
-  ],
-)
-
 FW_VERSIONS = {
-  CAR.BRONCO_SPORT_MK1: {
+  CAR.F150: {
+    (Ecu.fwdCamera, 0x706, None): [
+      b'FL3T-14G019-DE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    ],
     (Ecu.eps, 0x730, None): [
-      b'LX6C-14D003-AH\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LX6C-14D003-AK\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'GL34-14D003-AD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'GL34-14D003-AE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
     ],
     (Ecu.abs, 0x760, None): [
-      b'LX6C-2D053-RD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LX6C-2D053-RE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'FL34-2D053-BA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
     ],
     (Ecu.fwdRadar, 0x764, None): [
-      b'LB5T-14D049-AB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'FL3T-14D049-AF\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
     ],
-    (Ecu.fwdCamera, 0x706, None): [
-      b'M1PT-14F397-AC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    (Ecu.engine, 0x7e0, None): [
+      b'FL3A-14C204-ABL\x00\x00\x00\x00\x00\x00\x00\x00\x00'
     ],
-    (Ecu.engine, 0x7E0, None): [
-      b'M1PA-14C204-GF\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'N1PA-14C204-AC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    (Ecu.srs, 0x737, None): [
+      b'GR3T-14C028-AA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
     ],
-    (Ecu.shiftByWire, 0x732, None): [
-      b'LX6P-14G395-AD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'PZ1P-14G395-AB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-  },
-  CAR.ESCAPE_MK4: {
+  }, 
+  CAR.TRANSIT: {
     (Ecu.eps, 0x730, None): [
-      b'LX6C-14D003-AF\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LX6C-14D003-AH\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LX6C-14D003-AL\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'HV6T-14C217-AC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+    ], 
+    (Ecu.srs, 0x737, None): [
+      b'DT1T-14C028-BA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
     ],
     (Ecu.abs, 0x760, None): [
-      b'LX6C-2D053-NS\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LX6C-2D053-NY\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LX6C-2D053-SA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'DV61-14C036-AG\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
     ],
-    (Ecu.fwdRadar, 0x764, None): [
-      b'LB5T-14D049-AB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    (Ecu.engine, 0x7e0, None): [
+      b'DV6A-14C204-CG\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
     ],
-    (Ecu.fwdCamera, 0x706, None): [
-      b'LJ6T-14F397-AD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LJ6T-14F397-AE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.engine, 0x7E0, None): [
-      b'LX6A-14C204-BJV\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LX6A-14C204-ESG\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'MX6A-14C204-BEF\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'NX6A-14C204-BLE\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.shiftByWire, 0x732, None): [
-      b'LX6P-14G395-AB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LX6P-14G395-AD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'PZ1P-14G395-AC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-  },
-  CAR.EXPLORER_MK6: {
-    (Ecu.eps, 0x730, None): [
-      b'L1MC-14D003-AK\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'L1MC-14D003-AL\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'M1MC-14D003-AB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.abs, 0x760, None): [
-      b'L1MC-2D053-BA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'L1MC-2D053-BB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'L1MC-2D053-BF\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'L1MC-2D053-KB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.fwdRadar, 0x764, None): [
-      b'LB5T-14D049-AB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.fwdCamera, 0x706, None): [
-      b'LB5T-14F397-AE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LB5T-14F397-AF\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LC5T-14F397-AH\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.engine, 0x7E0, None): [
-      b'LB5A-14C204-BUJ\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'LB5A-14C204-EAC\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'MB5A-14C204-MD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'MB5A-14C204-RC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'NB5A-14C204-HB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.shiftByWire, 0x732, None): [
-      b'L1MP-14C561-AB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'L1MP-14G395-AD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'L1MP-14G395-AE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'L1MP-14G395-JB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-  },
-  CAR.FOCUS_MK4: {
-    (Ecu.eps, 0x730, None): [
-      b'JX6C-14D003-AH\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.abs, 0x760, None): [
-      b'JX61-2D053-CJ\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.fwdRadar, 0x764, None): [
-      b'JX7T-14D049-AC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.fwdCamera, 0x706, None): [
-      b'JX7T-14F397-AH\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.engine, 0x7E0, None): [
-      b'JX6A-14C204-BPL\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.shiftByWire, 0x732, None): [
-    ],
-  },
-  CAR.MAVERICK_MK1: {
-    (Ecu.eps, 0x730, None): [
-      b'NZ6C-14D003-AL\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.abs, 0x760, None): [
-      b'NZ6C-2D053-AG\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.fwdRadar, 0x764, None): [
-      b'NZ6T-14D049-AA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.fwdCamera, 0x706, None): [
-      b'NZ6T-14F397-AC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.engine, 0x7E0, None): [
-      b'NZ6A-14C204-AAA\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'NZ6A-14C204-PA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-      b'NZ6A-14C204-ZA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-    (Ecu.shiftByWire, 0x732, None): [
-      b'NZ6P-14G395-AD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-    ],
-  },
+  }
+}
+#FEATURES = {
+  #"use_op_longitudinal": [CAR.F150SG, CAR.FUSIONSG],
+#}
+
+SPEED_FACTOR = {
+  #CAR.FUSION:
+  CAR.FUSIONSG: 1.,
+  #CAR.EDGE:
+  #CAR.ESCAPE:
+  #CAR.EXPEDITION:
+  #CAR.EXPLORER: 
+  CAR.F150: 1.116,
+  #CAR.MUSTANG: 
+  CAR.MONDEO: 1.,
+  #CAR.RANGER: 
+  #CAR.TAURUS:
+  #CAR.FLEX: 
+  #CAR.FOCUS: 
+  CAR.TRANSIT: 1.,
+  #CAR.AVIATOR: 
+  #CAR.CONTINENTAL: 
+  #CAR.CORSAIR: 
+  #CAR.MKC: 
+  #CAR.MKS: 
+  #CAR.MKT: 
+  #CAR.MKX: 
+  #CAR.MKZ:
+  #CAR.NAVIGATOR: 
+  #CAR.NAUTILUS:
+}
+
+DBC = {
+  #Ford
+  #CAR.FUSION: dbc_dict('ford_newcan_pt', 'ford_fusion_2018_adas'), #ford_fusion_2018_pt
+  CAR.FUSIONSG: dbc_dict('ford_lincoln_base_pt', 'ford_fusion_2018_adas'), #ford_fusion_2018_pt
+  #CAR.EDGE: dbc_dict('placeholder', 'placeholder'),
+  #CAR.ESCAPE: dbc_dict('placeholder', 'placeholder'),
+  #CAR.EXPEDITION: dbc_dict('placeholder', 'placeholder'),
+  #CAR.EXPLORER: dbc_dict('placeholder', 'placeholder'),
+  CAR.F150: dbc_dict('ford_lincoln_base_pt', None),
+  #CAR.MUSTANG: dbc_dict('placeholder', 'placeholder'),
+  CAR.MONDEO: dbc_dict('ford_lincoln_base_pt', 'ford_fusion_2018_adas'), #ford_mondeo_2016_pt
+  #CAR.RANGER: dbc_dict('placeholder', 'placeholder'),
+  #CAR.TAURUS: dbc_dict('placeholder', 'placeholder'),
+  #CAR.FLEX: dbc_dict('placeholder', 'placeholder'),
+  #CAR.FOCUS: dbc_dict('placeholder', 'placeholder'),
+  CAR.TRANSIT: dbc_dict('ford_lincoln_base_pt', None),
+  #Lincoln
+  #CAR.AVIATOR: dbc_dict('placeholder', 'placeholder'),
+  #CAR.CONTINENTAL: dbc_dict('placeholder', 'placeholder'),
+  #CAR.CORSAIR: dbc_dict('placeholder', 'placeholder'),
+  #CAR.MKC: dbc_dict('placeholder', 'placeholder'),
+  #CAR.MKS: dbc_dict('placeholder', 'placeholder'),
+  #CAR.MKT: dbc_dict('placeholder', 'placeholder'),
+  #CAR.MKX: dbc_dict('placeholder', 'placeholder'),
+  #CAR.MKZ: dbc_dict('placeholder', 'placeholder'),
+  #CAR.NAVIGATOR: dbc_dict('placeholder', 'placeholder'),
+  #CAR.NAUTILUS: dbc_dict('placeholder', 'placeholder'),
 }
